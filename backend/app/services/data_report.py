@@ -2,6 +2,10 @@
 
 真实数据流：定义报告模板（包含指标集/周期/输出格式）→ pipeline.generate_report 读取最新指标值
 → 组装结构化报告内容 → 写入 report_outputs → 快照管理。
+
+预测误差报告走独立管道（app.forecast_errors）：从迁移后的按运行预测结果集
+读取逐日预测，与实际指标值按业务日关联生成误差段，报告内写明采用的运行
+范围以及是否包含未完全迁移的老数据。
 """
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import json
 from typing import Any
 
 from app.database import db
+from app.forecast_errors import audit_error_report, generate_forecast_error_report
 from app.pipeline import generate_report
 from app.services.base import BaseModuleService
 
@@ -31,6 +36,19 @@ class DataReportService(BaseModuleService):
 
         result = generate_report(dict(report))
         return {"ok": True, "report_name": result["report_name"], "summary": result["summary"]}
+
+    def generate_forecast_error_report(self, task_id: int, report_id: int | None = None) -> dict[str, Any]:
+        """生成预测误差报告：按业务日关联预测结果集与实际指标值。
+
+        报告内容包含采用的运行范围（run_scope）和是否含未完全迁移老数据
+        （contains_legacy_unconfirmed），连续日期只有来自同一轮已认证完整
+        预测时才会被标记为已认证。
+        """
+        return generate_forecast_error_report(task_id, report_id=report_id)
+
+    def audit_forecast_error_report(self, error_report_id: int) -> dict[str, Any]:
+        """切换后回查一份误差报告当时采用的逐日记录和真实运行范围。"""
+        return audit_error_report(error_report_id)
 
     def recent_outputs(self, report_id: int, limit: int = 10) -> list[dict[str, Any]]:
         """获取报告的历史生成结果。"""

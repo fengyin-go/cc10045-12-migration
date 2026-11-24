@@ -82,9 +82,80 @@ def api_compute_retention(task_id: int) -> dict:
 
 @router.post("/forecast/{task_id}/compute")
 def api_compute_forecast(task_id: int) -> dict:
-    """对指定预测任务执行计算。"""
+    """对指定预测任务执行计算（每次执行生成一轮独立 run）。"""
     svc = service_for("forecast_model")
     return svc.run_forecast(task_id)
+
+
+@router.get("/forecast/{task_id}/runs")
+def api_forecast_runs(task_id: int) -> dict:
+    """列出预测任务的全部运行（含迁移轮次与未确认来源）。"""
+    svc = service_for("forecast_model")
+    return {"ok": True, "task_id": task_id, "items": svc.list_runs(task_id)}
+
+
+@router.get("/forecast/{task_id}/runs/{run_id}/points")
+def api_forecast_run_points(task_id: int, run_id: int) -> dict:
+    """读取某一轮运行的逐日预测点（含区间与置信度）。"""
+    svc = service_for("forecast_model")
+    return {"ok": True, "task_id": task_id, "run_id": run_id,
+            "items": svc.forecast_data(task_id, run_id=run_id)}
+
+
+@router.get("/forecast/migration/status")
+def api_forecast_migration_status() -> dict:
+    """查看预测存储迁移进度与各来源运行计数。"""
+    return {"ok": True, **service_for("forecast_model").migration_status()}
+
+
+@router.post("/forecast/migration/migrate-batch")
+def api_forecast_migrate_batch(batch_size: int = 500) -> dict:
+    """搬运一批旧版逐日预测到按运行结果集（幂等，可重复执行）。"""
+    return service_for("forecast_model").migrate_batch(batch_size=batch_size)
+
+
+@router.post("/forecast/migration/migrate-all")
+def api_forecast_migrate_all() -> dict:
+    """搬运全部旧版预测行；重复执行不会再造同一份历史预测。"""
+    return service_for("forecast_model").migrate_all()
+
+
+@router.post("/forecast/migration/switch")
+def api_forecast_switch() -> dict:
+    """完成迁移切换：补迁旧行并把切换前影子运行按完整性转正。"""
+    return service_for("forecast_model").switch_storage()
+
+
+@router.get("/forecast/migration/unconfirmed")
+def api_forecast_unconfirmed(task_id: int | None = None) -> dict:
+    """列出未认证运行，供按未确认来源追检。"""
+    svc = service_for("forecast_model")
+    return {"ok": True, "items": svc.unconfirmed_runs(task_id)}
+
+
+@router.post("/forecast/runs/{run_id}/certify")
+def api_forecast_certify_run(run_id: int, note: str | None = None) -> dict:
+    """补迁核对后显式认证一轮完整预测。"""
+    return service_for("forecast_model").certify_run(run_id, note)
+
+
+@router.post("/forecast/{task_id}/error-report")
+def api_forecast_error_report(task_id: int, report_id: int | None = None) -> dict:
+    """生成预测误差报告：按业务日关联预测与实际，记录运行范围与迁移标记。"""
+    return service_for("forecast_model").generate_error_report(task_id, report_id)
+
+
+@router.get("/forecast/error-reports")
+def api_forecast_error_reports(task_id: int | None = None) -> dict:
+    """列出预测误差报告。"""
+    from app.forecast_errors import list_error_reports
+    return {"ok": True, "items": list_error_reports(task_id)}
+
+
+@router.get("/forecast/error-reports/{error_report_id}/audit")
+def api_forecast_error_report_audit(error_report_id: int) -> dict:
+    """切换后回查误差报告曾用到的逐日记录与真实运行范围。"""
+    return service_for("forecast_model").audit_error_report(error_report_id)
 
 
 @router.post("/comparison/{comparison_id}/compute")

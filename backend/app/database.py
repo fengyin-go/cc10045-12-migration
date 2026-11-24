@@ -224,6 +224,93 @@ DDL_STATEMENTS = [
         FOREIGN KEY (task_id) REFERENCES forecast_tasks(id)
     )""",
 
+    # ---- Forecast run-based storage (schema v2, 按单次运行存储) ----
+    # 每一次预测执行对应一行 forecast_runs；逐日预测点挂在 forecast_run_points 下。
+    # source_kind 标记数据来源：
+    #   new_run            切换后由预测管道新签发的一轮（默认已认证）
+    #   migrated_legacy    从旧版 forecast_results 迁移、可确认属于同一轮的存量
+    #   pre_switch_shadow  迁移切换期间、切换尚未完成时写入的新一轮预测（待核对）
+    #   legacy_unconfirmed 旧存量无法证明属于同一轮，按未确认来源追检
+    # certified=1 表示这是一轮“已确认的完整预测”，误差报告只有在连续日期全部
+    # 来自同一个 certified run 时，才允许把该日期段标记为已认证。
+    """CREATE TABLE IF NOT EXISTS forecast_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        run_seq INTEGER NOT NULL,
+        source_kind TEXT NOT NULL CHECK(source_kind IN (
+            'new_run','migrated_legacy','pre_switch_shadow','legacy_unconfirmed'
+        )),
+        certified INTEGER NOT NULL DEFAULT 0,
+        migration_batch TEXT,
+        source_note TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'completed',
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(task_id, run_seq),
+        FOREIGN KEY (task_id) REFERENCES forecast_tasks(id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_fruns_task ON forecast_runs(task_id, certified)",
+
+    """CREATE TABLE IF NOT EXISTS forecast_run_points (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        task_id INTEGER NOT NULL,
+        forecast_date TEXT NOT NULL,
+        predicted_value REAL NOT NULL,
+        lower_bound REAL,
+        upper_bound REAL,
+        confidence REAL DEFAULT 0.95,
+        legacy_result_id INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(run_id, forecast_date),
+        FOREIGN KEY (run_id) REFERENCES forecast_runs(id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_fpoints_date ON forecast_run_points(task_id, forecast_date)",
+    "CREATE INDEX IF NOT EXISTS idx_fpoints_legacy ON forecast_run_points(legacy_result_id)",
+
+    # 迁移台账：每个旧版 forecast_results 行最多登记一条，保证重复迁移不重复落库。
+    """CREATE TABLE IF NOT EXISTS forecast_migration_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        legacy_result_id INTEGER NOT NULL UNIQUE,
+        task_id INTEGER NOT NULL,
+        run_id INTEGER,
+        migration_batch TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        migrated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+
+    # 预测误差报告：报告级元数据，记录采用的运行范围与是否含未完全迁移的老数据。
+    """CREATE TABLE IF NOT EXISTS forecast_error_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_id INTEGER,
+        task_id INTEGER NOT NULL,
+        business_date_from TEXT,
+        business_date_to TEXT,
+        run_scope TEXT NOT NULL DEFAULT '[]',
+        contains_legacy_unconfirmed INTEGER NOT NULL DEFAULT 0,
+        certified INTEGER NOT NULL DEFAULT 0,
+        mape_pct REAL,
+        generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+
+    # 误差段：按业务日关联预测点与实际指标值，逐日落来源与认证结论。
+    """CREATE TABLE IF NOT EXISTS forecast_error_segments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        error_report_id INTEGER NOT NULL,
+        task_id INTEGER NOT NULL,
+        business_date TEXT NOT NULL,
+        run_id INTEGER,
+        source_kind TEXT,
+        run_certified INTEGER NOT NULL DEFAULT 0,
+        predicted_value REAL,
+        actual_value REAL,
+        abs_error REAL,
+        pct_error REAL,
+        FOREIGN KEY (error_report_id) REFERENCES forecast_error_reports(id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_fseg_report ON forecast_error_segments(error_report_id)",
+
     # ==================== Comparison & Report Tier ====================
     """CREATE TABLE IF NOT EXISTS cohort_comparisons (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

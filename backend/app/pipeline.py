@@ -670,11 +670,21 @@ def detect_anomaly(analysis: dict[str, Any]) -> dict[str, Any]:
 # ============================================================================
 
 def compute_forecast(task: dict[str, Any]) -> list[dict[str, Any]]:
-    """基于历史指标值执行时间序列预测。
+    """基于历史指标值执行时间序列预测，并按单次运行落库。
 
     使用简单指数平滑（SES）或移动平均法，根据 method 选择：
     返回未来 N 天的预测值、上下界和置信区间。
+
+    存储上每次执行创建一轮 ``forecast_runs`` + 逐日 ``forecast_run_points``，
+    不再删除历史：重复运行得到不同 run_seq，不会覆盖或再造同一份历史预测。
+    迁移切换前的新运行标记为 ``pre_switch_shadow``（未认证，留来源待核对），
+    切换后才签发 ``new_run`` 已认证运行。旧版 ``forecast_results`` 表在
+    迁移期保持只读，供补迁与回查。
     """
+    from app.forecast_migration import (
+        KIND_NEW_RUN, KIND_SHADOW, is_switched,
+    )
+
     task_id = task["id"]
     target_metric = task.get("预测指标", task.get("target_metric", ""))
     forecast_days = int(task.get("预测周期", task.get("forecast_period_days", 7)))
@@ -684,9 +694,6 @@ def compute_forecast(task: dict[str, Any]) -> list[dict[str, Any]]:
     metric = db.fetchone("SELECT id FROM metrics WHERE metric_name LIKE ?", [f"%{target_metric}%"])
     if not metric:
         return []
-
-    # 清除旧结果
-    db.delete("forecast_results", "task_id=?", [task_id])
 
     snapshots = db.fetchall(
         "SELECT snapshot_value, snapshot_time FROM metric_values WHERE metric_id=? "
@@ -698,10 +705,27 @@ def compute_forecast(task: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     values = [s["snapshot_value"] for s in reversed(snapshots)]
-    results: list[dict[str, Any]] = []
-
     now = datetime.now(timezone.utc)
 
+    switched = is_switched()
+    source_kind = KIND_NEW_RUN if switched else KIND_SHADOW
+    note = (
+        "切换后新一轮预测" if switched
+        else "迁移切换期间写入的新一轮预测，切换前暂不认证，保留来源待补迁核对"
+    )
+
+    run_id = db.insert("forecast_runs", {
+        "task_id": task_id,
+        "run_seq": _next_forecast_run_seq(task_id),
+        "source_kind": source_kind,
+        # 切换后的完整运行直接认证；影子运行必须等切换核对后才可能转正。
+        "certified": 1 if switched else 0,
+        "source_note": note,
+        "status": "running",
+        "started_at": db.now(),
+    })
+
+    results: list[dict[str, Any]] = []
     for day in range(1, forecast_days + 1):
         if method in ("ses", "指数平滑", "exponential_smoothing"):
             alpha = 0.3
@@ -732,7 +756,8 @@ def compute_forecast(task: dict[str, Any]) -> list[dict[str, Any]]:
 
         forecast_date = (now + timedelta(days=day)).strftime("%Y-%m-%d")
 
-        result_id = db.insert("forecast_results", {
+        point_id = db.insert("forecast_run_points", {
+            "run_id": run_id,
             "task_id": task_id,
             "forecast_date": forecast_date,
             "predicted_value": round(predicted, 4),
@@ -741,14 +766,24 @@ def compute_forecast(task: dict[str, Any]) -> list[dict[str, Any]]:
             "confidence": confidence,
         })
         results.append({
-            "id": result_id,
+            "id": point_id,
+            "run_id": run_id,
             "forecast_date": forecast_date,
             "predicted_value": round(predicted, 4),
             "lower_bound": round(lower, 4),
             "upper_bound": round(upper, 4),
         })
 
+    db.update("forecast_runs", {"status": "completed", "completed_at": db.now()}, "id=?", [run_id])
     return results
+
+
+def _next_forecast_run_seq(task_id: int) -> int:
+    row = db.fetchone(
+        "SELECT COALESCE(MAX(run_seq), 0) + 1 AS next_seq FROM forecast_runs WHERE task_id=?",
+        [task_id],
+    )
+    return int(row["next_seq"]) if row else 1
 
 
 # ============================================================================

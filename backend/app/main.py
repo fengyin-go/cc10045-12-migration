@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import db
+from app.forecast_migration import ensure_startup_migration
 from app.pipeline import seed_real_data
 from app.routers import ROUTERS, PIPELINE_ROUTER
 from app.store import store
@@ -27,7 +28,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_seed() -> None:
-    """应用启动时初始化种子数据。"""
+    """应用启动时初始化种子数据，并确保预测结果迁移到按运行存储。"""
     try:
         existing = db.count("metrics")
         if existing == 0:
@@ -37,6 +38,12 @@ def startup_seed() -> None:
             print(f"[seed] 数据集已存在，跳过初始化 (metrics={existing})")
     except Exception as e:
         print(f"[seed] 初始化失败: {e}")
+
+    try:
+        migration = ensure_startup_migration()
+        print(f"[forecast-migration] 预测运行存储迁移状态: {migration}")
+    except Exception as e:
+        print(f"[forecast-migration] 迁移检查失败: {e}")
 
 
 @app.get("/api/health")

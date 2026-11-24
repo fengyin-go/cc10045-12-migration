@@ -20,7 +20,9 @@ class Store:
         business_tables = [t for t in tables if not t.startswith("_") and t not in
                           ("aggregation_results", "metric_values", "segment_members",
                            "funnel_results", "retention_results", "cube_cells",
-                           "forecast_results", "report_outputs", "alert_log")]
+                           "forecast_results", "forecast_runs", "forecast_run_points",
+                           "forecast_migration_ledger", "forecast_error_reports",
+                           "forecast_error_segments", "report_outputs", "alert_log")]
         return sorted(business_tables)
 
     def rows(self, module: str) -> list[dict[str, Any]]:

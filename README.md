@@ -18,6 +18,8 @@
 │   ├── app/routers/resource.py  通用查询/导出/登记/动作接口
 │   ├── app/services/<key>.py    每个模块独立领域逻辑
 │   ├── app/services/base.py     共享服务骨架
+│   ├── app/forecast_migration.py 预测结果按单次运行（run）存储的版本迁移
+│   ├── app/forecast_errors.py   预测误差报告：按业务日关联预测与实际值
 │   └── app/store.py          内存数据仓库与示例数据
 ├── .gitignore
 └── docker-compose.yml
@@ -78,6 +80,27 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 预测结果按单次运行（run）存储
+
+旧版逐日预测直接堆在 `forecast_results`，多次运行互相覆盖。迁移后每次预测
+执行落成一轮 `forecast_runs` + 逐日 `forecast_run_points`（区间与置信度随点保存）：
+
+- `app/forecast_migration.py`：幂等搬运旧表（台账 `forecast_migration_ledger`
+  保证重复迁移不重复落库）。单组且日期连续的存量认证为 `migrated_legacy`；
+  多组或日期不连续、来源不明确的标为 `legacy_unconfirmed` 追检，不能被拼成
+  一轮已认证预测。切换前写入的新轮次标为 `pre_switch_shadow`，保留来源待
+  切换核对。阶段记录在 `_schema`，切换后再出现未迁移老数据会自动回到
+  `in_progress`。
+- `app/forecast_errors.py`：误差报告只读迁移后的运行结果集，按业务日关联
+  `metric_values` 实际值生成误差段（`forecast_error_reports` /
+  `forecast_error_segments`），报告写明 `run_scope` 与
+  `contains_legacy_unconfirmed`。选点按“整轮”进行，连续日期只能来自同一轮
+  已认证完整预测；跨轮回退点保留来源且整份报告不予认证。
+- 运维/回查接口在 `/api/pipeline/forecast/...`：`migration/status`、
+  `migration/migrate-batch|migrate-all|switch`、`migration/unconfirmed`、
+  `runs/{id}/certify`、`{task_id}/runs`、`{task_id}/error-report`、
+  `error-reports/{id}/audit`。
 
 领域：数据工程
 子方向：数据分析与数据应用
